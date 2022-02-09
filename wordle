@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+if ! [ "${BASH_VERSINFO:-0}" -ge 4 ]
+then
+  echo 'Bash version >= 4 required, exiting.' 1>&2
+
+  if command -v docker &>/dev/null
+  then
+    cat - <<'EOS' || true
+Looks like you have Docker! Try this:
+docker run --rm -it \
+  -v "${PWD}/wordle.sh:/wordle.sh" \
+  -v '/path/to/dict:/words' \
+  -e WORDS_FILE=/words \
+  bash:latest /wordle.sh
+EOS
+  fi
+
+  exit 1
+fi
+
+set -o errexit -o errtrace -o nounset -o pipefail
+
+declare -r WORDS_FILE="${WORDS_FILE:-"/usr/share/dict/words"}"
+declare -ir WORD_LENGTH="${WORD_LENGTH:-"5"}"
+
+function :printf () {
+  # shellcheck disable=SC2059
+  printf -- "$1" "${@:2}"
+}
+
+function :print () {
+  :printf '%s' "$@"
+}
+
+function :println () {
+  :printf '%s\n' "$@"
+}
+
+function :green () {
+  :printf '\e[32m%s\e[0m' "$1"
+}
+
+function :yellow () {
+  :printf '\e[33m%s\e[0m' "$1"
+}
+
+function :dark-gray () {
+  :printf '\e[90m%s\e[0m' "$1"
+}
+
+function :print-guess () {
+  local word="${1^^}" guess="${2^^}"
+
+  {
+    :println "${guess::${#word}}" \
+      | fold -w 1 \
+      | {
+        : ${#word}
+        nl -v 0 -w "${#_}" -n 'ln'
+      }
+  } | {
+    while read -r offset letter
+    do
+      if [[ "$letter" == "${word:${offset}:1}" ]]
+      then :green "$letter"
+      elif [[ "$word" == *"$letter"* ]]
+      then :yellow "$letter"
+      else :dark-gray "$letter"
+      fi
+    done
+  }
+}
+
+declare -a TEMP_FILES=()
+
+function :exit () {
+  :println "${TEMP_FILES[@]}" | {
+    while IFS= read -r
+    do
+      if [[ -f "$REPLY" ]]
+      then rm -f "$REPLY"
+      fi
+    done
+  }
+}
+
+trap :exit EXIT
+
+function :mktemp () {
+  declare -g "$1"="$(mktemp)"
+  TEMP_FILES+=("${!1}")
+}
+
+:mktemp TEMP_SHUFFLED_WORDS_FILE
+shuf -o "$TEMP_SHUFFLED_WORDS_FILE" "$WORDS_FILE"
+
+:mktemp TEMP_FILTERED_WORDS_FILE
+grep -x -E "[a-z]{${WORD_LENGTH}}" \
+  "$TEMP_SHUFFLED_WORDS_FILE" 1>"$TEMP_FILTERED_WORDS_FILE"
+
+rm -f "$TEMP_SHUFFLED_WORDS_FILE"
+unset -v TEMP_SHUFFLED_WORDS_FILE
+
+# shellcheck disable=SC2155
+declare -i WORDS="$(wc -l "$TEMP_FILTERED_WORDS_FILE" | awk '{print $1}')"
+
+for ROUND in $(seq "$WORDS")
+do
+  WORD="$(sed "${ROUND}q;d" "$TEMP_FILTERED_WORDS_FILE")"
+
+  declare -i ATTEMPTS=0
+
+  while [[ $ATTEMPTS -lt 6 ]]
+  do
+    read -r -p "$((ATTEMPTS+1)): " -n "${#WORD}" GUESS
+
+    if ! grep -x -s "${GUESS,,}" "$TEMP_FILTERED_WORDS_FILE"
+    then
+      :printf '\r%*s\r' "$COLUMNS"
+      :printf '\r\e[31;5m%s\e[0m' 'INVALID'
+      sleep 1
+      :printf '\r%*s\r' "$COLUMNS"
+      continue
+    fi
+
+    ((++ATTEMPTS))
+
+    :printf '\r%s\n' "${ATTEMPTS}: $(:print-guess "$WORD" "$GUESS")"
+
+    if [[ "${GUESS^^}" == "${WORD^^}" ]]
+    then
+      :println
+      continue 2
+    fi
+  done
+
+  :printf '\nANSWER: %s\n\n' "${WORD^^}"
+done
